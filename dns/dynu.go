@@ -1,154 +1,158 @@
 package dns
 
 import (
-"fmt"
-"github.com/jeessy2/ddns-go/v6/util"
-"log"
-"net/http"
-"net/url"
-"strings"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/jeessy2/ddns-go/v5/config"
+	"github.com/jeessy2/ddns-go/v5/util"
 )
 
-// Dynu 信息
+// Dynu 提供商结构体
 type Dynu struct {
-Username string
-Password string
-Domain   string
-SubDomain string
+	DNSServers []string
+	config     *config.DNSConfig
 }
 
-// 通用返回信息
-type DynuResult struct {
-Success bool   `json:"success"`
-Message string `json:"message"`
+// dynu域名信息响应结构体
+type dynuDomainInfo struct {
+	ID     int    `json:"id"`
+	Domain string `json:"domain"`
+	IPv4   string `json:"ipv4Address"`
+	IPv6   string `json:"ipv6Address"`
 }
 
-// 域名解析记录
-type DynuRecord struct {
-Id   int    `json:"id"`
-Name string `json:"name"`
+// dynu更新IP请求结构体
+type dynuUpdateRequest struct {
+	IPv4 string `json:"ipv4Address,omitempty"`
+	IPv6 string `json:"ipv6Address,omitempty"`
 }
 
-// 查询域名解析记录返回信息
-type DynuQueryResult struct {
-Success bool        `json:"success"`
-Message string      `json:"message"`
-Array   []DynuRecord `json:"array"`
+// 初始化Dynu
+func NewDynu(dnsConfig *config.DNSConfig) *Dynu {
+	return &Dynu{
+		config: dnsConfig,
+	}
 }
 
-// 获取域名解析记录
-func (dynu *Dynu) GetDnsRecord(ipType int) (string, string) {
-// 获取 Token
-token, err := dynu.getToken()
-if err != nil {
-return "", ""
+// 初始化
+func (d *Dynu) Init() error {
+	// Dynu 无需额外初始化
+	return nil
 }
 
-// 查询记录
-subDomain := ""
-if dynu.SubDomain != "" {
-subDomain = dynu.SubDomain + "."
-}
-recordUrl := fmt.Sprintf("https://api.dynu.com/v2/dns/%s/%s", token, url.PathEscape(dynu.Domain))
-respBody := util.HttpGetWithHeaders(recordUrl, map[string]string{
-"User-Agent": util.UserAgent,
-})
-var queryResult DynuQueryResult
-util.JSON.Unmarshal(respBody, &queryResult)
+// 新增或更新域名解析
+func (d *Dynu) AddUpdateDomainRecords() (domains []string, err error) {
+	// 获取所有域名
+	domainList := util.GetDomainList(d.config.Domain)
+	if len(domainList) == 0 {
+		return domains, errors.New("域名不能为空")
+	}
 
-if !queryResult.Success {
-log.Printf("Query Dynu record failed: %s", queryResult.Message)
-return "", ""
-}
+	// 遍历所有域名更新
+	for _, domain := range domainList {
+		// 1. 获取域名ID
+		domainID, err := d.getDomainID(domain)
+		if err != nil {
+			return domains, fmt.Errorf("获取域名ID失败: %w", err)
+		}
 
-var recordId int
-for _, record := range queryResult.Array {
-if record.Name == subDomain+dynu.Domain {
-recordId = record.Id
-break
-}
-}
-if recordId == 0 {
-log.Printf("Domain %s not found in Dynu", subDomain+dynu.Domain)
-return "", ""
-}
+		// 2. 更新IP
+		err = d.updateIP(domainID)
+		if err != nil {
+			return domains, fmt.Errorf("更新域名失败: %w", err)
+		}
 
-return fmt.Sprintf("%d", recordId), ""
+		domains = append(domains, domain)
+	}
+
+	return domains, nil
 }
 
-// 新增域名解析记录
-func (dynu *Dynu) AddDnsRecord(ipType int, domainId string, value string) bool {
-// 获取 Token
-token, err := dynu.getToken()
-if err != nil {
-return false
+// getDomainID 通过API获取域名ID
+func (d *Dynu) getDomainID(domain string) (int, error) {
+	client := util.GetHTTPClient()
+	req, err := http.NewRequest("GET", "https://api.dynu.com/v2/dns", nil)
+	if err != nil {
+		return 0, err
+	}
+
+	// 设置请求头
+	d.setAuthHeader(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	// 解析响应
+	var result struct {
+		Domains []dynuDomainInfo `json:"domains"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+
+	// 匹配域名
+	for _, d := range result.Domains {
+		if strings.EqualFold(d.Domain, domain) {
+			return d.ID, nil
+		}
+	}
+
+	return 0, fmt.Errorf("未找到域名: %s", domain)
 }
 
-// 构建更新 URL
-// Dynu API v2 使用 PUT 方法更新记录
-updateUrl := fmt.Sprintf("https://api.dynu.com/v2/dns/%s/%s/%s", token, url.PathEscape(dynu.Domain), domainId)
-// 注意：Dynu v2 API 需要发送 JSON 数据包
-jsonBody := fmt.Sprintf(`{"content":"%s"}`, value)
+// updateIP 更新IP地址
+func (d *Dynu) updateIP(domainID int) error {
+	// 构建更新请求
+	updateReq := dynuUpdateRequest{}
+	if d.config.IPv4 != "" {
+		updateReq.IPv4 = d.config.IPv4
+	}
+	if d.config.IPv6 != "" {
+		updateReq.IPv6 = d.config.IPv6
+	}
 
-// 使用 PUT 请求发送更新
-req, err := http.NewRequest("PUT", updateUrl, strings.NewReader(jsonBody))
-if err != nil {
-log.Printf("Create request failed: %v", err)
-return false
+	// 转换为JSON
+	jsonData, err := json.Marshal(updateReq)
+	if err != nil {
+		return err
+	}
+
+	// 创建请求
+	url := fmt.Sprintf("https://api.dynu.com/v2/dns/%d", domainID)
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return err
+	}
+
+	// 设置请求头
+	d.setAuthHeader(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	// 发送请求
+	client := util.GetHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 检查响应状态
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("API请求失败, 状态码: %d", resp.StatusCode)
+	}
+
+	return nil
 }
-req.Header.Set("User-Agent", util.UserAgent)
-req.Header.Set("Content-Type", "application/json")
 
-client := &http.Client{}
-resp, err := client.Do(req)
-if err != nil {
-log.Printf("Update Dynu record failed: %v", err)
-return false
-}
-defer resp.Body.Close()
-
-body := util.Reader2Bytes(resp.Body)
-var result DynuResult
-util.JSON.Unmarshal(body, &result)
-
-if result.Success {
-log.Printf("Update Dynu record success: %s", value)
-return true
-} else {
-log.Printf("Update Dynu record failed: %s", result.Message)
-return false
-}
-}
-
-// 获取认证 Token
-// Dynu API v2 需要先通过 Basic Auth 获取 Token
-func (dynu *Dynu) getToken() (string, error) {
-authUrl := "https://api.dynu.com/v2/auth"
-req, err := http.NewRequest("POST", authUrl, nil)
-if err != nil {
-log.Printf("Create auth request failed: %v", err)
-return "", err
-}
-req.SetBasicAuth(dynu.Username, dynu.Password)
-req.Header.Set("User-Agent", util.UserAgent)
-
-client := &http.Client{}
-resp, err := client.Do(req)
-if err != nil {
-log.Printf("Auth to Dynu failed: %v", err)
-return "", err
-}
-defer resp.Body.Close()
-
-body := util.Reader2Bytes(resp.Body)
-// Dynu Auth 返回示例: {"id":12345,"token":"abc-def-ghi"}
-var authResult map[string]interface{}
-util.JSON.Unmarshal(body, &authResult)
-
-if token, ok := authResult["token"].(string); ok {
-return token, nil
-} else {
-log.Printf("Get Dynu token failed: Invalid response %s", string(body))
-return "", fmt.Errorf("get token failed")
-}
+// setAuthHeader 设置认证头
+func (d *Dynu) setAuthHeader(req *http.Request) {
+	// Dynu API 使用 API Key 认证
+	req.Header.Set("API-Key", d.config.Secret)
 }
