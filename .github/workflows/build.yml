@@ -1,4 +1,4 @@
-name: Build ddns-go (include armv7)
+name: Build ddns-go with custom version
 
 on:
   push:
@@ -16,12 +16,12 @@ jobs:
         with:
           go-version: 1.22
 
-      - name: Build for linux armv7
+      # 自定义版本号：你想改成什么就改这里
+      - name: Build linux armv7 with custom version
         run: |
-          # 关键：交叉编译 armv7
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags "-s -w" -o ddns-go-linux-armv7 main.go
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags "-X main.version=6.16.4.1 -s -w" -o ddns-go-linux-armv7 main.go
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ddns-go-linux-armv7
