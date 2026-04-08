@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jeessy2/ddns-go/v5/config"
-	"github.com/jeessy2/ddns-go/v5/util"
+	"github.com/sdrhseb32/ddns-go/config"
+	"github.com/sdrhseb32/ddns-go/util"
 )
 
 // Dynu 提供商结构体
